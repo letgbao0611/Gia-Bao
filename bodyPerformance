@@ -1,0 +1,556 @@
+---
+title: "Báo cáo nhóm 14"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Necessary Libraries
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggcorrplot)
+library(dplyr)
+library(gridExtra)
+library(coin)
+library(caret)
+library(car)
+library(janitor)
+library(randomForest)
+library(pROC)
+```
+
+## Load the Dataset
+
+```{r}
+data <- read.csv("D:/Code/R/datasets/bodyPerformance.csv", stringsAsFactors = FALSE)
+
+```
+
+## Data Processing
+
+### Check Data Structure
+
+```{r}
+str(data)
+summary(data)
+```
+
+### Nomalize column name
+
+```{r}
+data <- clean_names(data)
+colnames(data)
+```
+
+### Check and Remove Missing Values
+
+```{r}
+missing_values <- colSums(is.na(data))
+print(missing_values)
+data <- na.omit(data)
+```
+
+### Remove Duplicate Data
+
+```{r}
+data <- data[!duplicated(data), ]
+```
+
+### Filter Out Negative Values in Sit and Bend Forward
+
+```{r}
+data <- data %>%
+  filter(data[["sit_and_bend_forward_cm"]] > 0)
+summary(data$sit_and_bend_forward_cm)
+```
+
+### Calculate BMI and Add to DataFrame
+
+```{r}
+data['bmi'] <- data['weight_kg'] / (data['height_cm']/100)^2
+```
+
+### Identify and Remove Outliers
+
+```{r}
+data_filter <- data
+numeric_vars <- data %>% select_if(is.numeric) %>% select(-bmi)
+outlier_table <- data.frame(Column = character(),
+                            Outlier_Percentage = numeric(),
+                            stringsAsFactors = FALSE)
+
+for (col in names(numeric_vars)) {
+  q1 <- quantile(data[[col]], 0.25, na.rm = TRUE)
+  q3 <- quantile(data[[col]], 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  lower_bound <- q1 - 1.5 * iqr
+  upper_bound <- q3 + 1.5 * iqr
+  outlier <- data[[col]][data[[col]] < lower_bound | data[[col]] > upper_bound]
+  
+  if (length(outlier) > 0) {
+    outlier_percentage <- (length(outlier) / length(data[[col]])) * 100
+    outlier_table <- rbind(outlier_table, data.frame(
+      Column = col,
+      Outlier_Percentage = round(outlier_percentage, 2)))
+  }
+  
+  data_filter <- data_filter %>%
+    filter(get(col) >= lower_bound & get(col) <= upper_bound)
+}
+
+outlier_table
+summary(data_filter)
+```
+
+### Categorize BMI
+
+```{r}
+data_filter <- data_filter %>%
+  mutate(
+    bmi_category = case_when(
+      bmi < 18.5 ~ "Underweight",
+      bmi >= 18.5 & bmi < 25 ~ "Normal",
+      bmi >= 25 & bmi < 30 ~ "Overweight",
+      bmi >= 30 ~ "Obese",
+      TRUE ~ NA_character_))
+```
+
+### Categorize Systolic and Diastolic Blood Pressure
+
+```{r}
+data_filter <- data_filter %>%
+  mutate(
+    systolic_category = case_when(
+      systolic >= 120 & systolic <= 130 ~ "Normal",
+      systolic < 120 ~ "Low",
+      systolic > 130 ~ "High",
+      TRUE ~ NA_character_),
+    diastolic_category = case_when(
+      diastolic >= 70 & diastolic <= 90 ~ "Normal",
+      diastolic < 70 ~ "Low",
+      diastolic > 90 ~ "High",
+      TRUE ~ NA_character_))
+```
+
+### Normalize Categorical and Numeric Data
+
+```{r}
+data_filter$class <- as.factor(data_filter$class)
+data_filter$gender <- as.factor(data_filter$gender)
+data_filter$bmi_category <- as.factor(data_filter$bmi_category)
+data_filter$systolic_category <- as.factor(data_filter$systolic_category)
+data_filter$diastolic_category <- as.factor(data_filter$diastolic_category)
+
+numeric_vars <- data_filter %>% select_if(is.numeric)
+scaled_vars <- as.data.frame(scale(numeric_vars))
+```
+
+## Exploratory Data Analysis (EDA)
+
+### Distribution Before and After Outlier Removal
+
+```{r, fig.width=12, fig.height=8}
+columns <- data_filter %>% select_if(is.numeric) %>% colnames()
+
+# Before filtering outliers
+plots <- list()
+for (i in columns){
+  p <- ggplot(data, aes_string(x = i)) + 
+    geom_boxplot(binwidth = 2, fill = "blue", color = "black", alpha = 0.7) + 
+    theme_minimal() + 
+    labs(title = paste("Distribution of", i,"before filter outlier"), x = i, y = "count") + 
+    theme(plot.title = element_text(hjust = 0.5))
+  plots[[i]] <- p
+}
+grid.arrange(grobs = plots, ncol = 3)
+
+# After filtering outliers
+plots_filter <- list()
+for (i in columns){
+  p <- ggplot(data_filter, aes_string(x = i)) + 
+    geom_boxplot(binwidth = 2, fill = "blue", color = "black", alpha = 0.7) + 
+    theme_minimal() + 
+    labs(title = paste("Distribution of", i, "after filter outlier"), x = i, y = "count") + 
+    theme(plot.title = element_text(hjust = 0.5))
+  plots_filter[[i]] <- p
+}
+grid.arrange(grobs = plots_filter, ncol = 3)
+```
+
+### Class Distribution
+
+```{r, fig.width=8, fig.height=4}
+# Class distribution
+p1 <- ggplot(data_filter, aes(x = class, fill = class)) + 
+  geom_bar(alpha = 0.7) + 
+  theme_minimal() + 
+  labs(title = "Distribution of Class", x = 'Class', y = "Count") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Gender distribution by class
+p2 <- ggplot(data_filter, aes(x = class, fill = gender)) + 
+  geom_bar(position = "fill") + 
+  theme_minimal() +
+  labs(title = "Gender Distribution by Class", x = "Class", y = "Proportion") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+### Distribution by Class and Exercise
+
+```{r, fig.width=12, fig.height=8}
+columns <- c("grip_force", "sit_and_bend_forward_cm", "sit_ups_counts", "broad_jump_cm")
+plots <- list()
+
+for (col in columns) {
+  p <- ggplot(data_filter, aes_string(x = col, fill = "class")) + 
+    geom_histogram(binwidth = 2, color = "black", alpha = 0.7, position = 'fill') + 
+    theme_minimal() + 
+    labs(title = paste("Distribution of class by", col), x = col, y = "Proportion") + 
+    theme(plot.title = element_text(hjust = 0.5))
+  plots[[col]] <- p
+}
+grid.arrange(grobs = plots, ncol = 2)
+```
+
+### Systolic and Diastolic Category Distribution
+
+```{r, fig.width=12, fig.height=6}
+plots <- list()
+
+p1 <- ggplot(data_filter, aes(x = systolic_category, fill = class)) + 
+  geom_bar(alpha = 0.7, position = 'dodge') + 
+  theme_minimal() + 
+  labs(title = "Distribution of Systolic category", x = 'Systolic Category', y = "Count") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- ggplot(data_filter, aes(x = diastolic_category, fill = class)) + 
+  geom_bar(alpha = 0.7, position = 'dodge') + 
+  theme_minimal() + 
+  labs(title = "Distribution of Diastolic category", x = 'Diastolic Category', y = "Count") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+p3 <- ggplot(data_filter, aes(x = bmi_category, fill = class)) + 
+  geom_bar(alpha = 0.7, position = 'dodge') + 
+  theme_minimal() + 
+  labs(title = "Distribution of BMI category", x = 'BMI Category', y = "Count") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+### Correlation Matrix
+
+```{r, fig.width=8, fig.height=6}
+cor_matrix <- cor(data_filter %>% select_if(is.numeric))
+print(cor_matrix)
+ggcorrplot(cor_matrix, 
+           hc.order = TRUE, 
+           lab = TRUE, 
+           lab_size = 3, 
+           method = "circle", 
+           colors = c("tomato2", "white", "springgreen3"),
+           title = "Correlation Matrix",
+           ggtheme = theme_minimal())
+```
+
+## A/B Testing
+
+### ANOVA
+
+```{r}
+# ANOVA
+columns <- c("grip_force", "sit_and_bend_forward_cm", "sit_ups_counts", "broad_jump_cm")
+
+# Kiểm định hoán vị cho từng cột thể dục
+for (col in columns) {
+  cat("\nHoán vị ANOVA cho biến:", col, "\n")
+  
+  # Thực hiện kiểm định hoán vị One-way ANOVA
+  result <- oneway_test(as.formula(paste(col, "~ class")), data = data_filter, distribution = "approximate")
+  
+  # In kết quả
+  print(result)
+}
+```
+
+### A/B Testing for Gender
+
+```{r}
+set.seed(123)
+
+# Columns to be tested
+columns <- c("grip_force", "sit_and_bend_forward_cm", "sit_ups_counts", "broad_jump_cm")
+
+# Number of permutations
+n_perm <- 10000
+
+# Function to perform permutation test
+perm_test_gender <- function(data, var) {
+  # Actual data
+  female <- data[[var]][data_filter$gender == "F"]
+  male <- data[[var]][data_filter$gender == "M"]
+  
+  # Actual mean difference
+  actual_diff <- mean(male) - mean(female)
+  
+  # Permutations
+  perm_diffs <- numeric(n_perm)
+  
+  for (i in 1:n_perm) {
+    perm_gender <- sample(data_filter$gender)
+    perm_female <- data[[var]][perm_gender == "F"]
+    perm_male <- data[[var]][perm_gender == "M"]
+    perm_diffs[i] <- mean(perm_male) - mean(perm_female)
+  }
+  
+  # Calculate p-value
+  p_value <- mean(abs(perm_diffs) >= abs(actual_diff))
+  
+  return(list(actual_diff = actual_diff, p_value = p_value))
+}
+
+# Perform tests for each column
+for (col in columns) {
+  cat("\nPermutation test for variable:", col, "\n")
+  result <- perm_test_gender(data_filter, col)
+  cat("Actual mean difference:", result$actual_diff, "\n")
+  cat("P-value:", result$p_value, "\n")
+}
+```
+
+### A/B Testing for Age Group
+
+```{r}
+set.seed(123)  # Ensure reproducibility
+
+# Create age group variable
+data_filter$group_age <- ifelse(data_filter$age >= 20 & data_filter$age <= 40, "Youth", "Middle_Aged")
+
+# Columns to be tested
+columns <- c("grip_force", "sit_and_bend_forward_cm", "sit_ups_counts", "broad_jump_cm")
+
+# Function to perform permutation test
+perm_test_age <- function(data, var) {
+  # Actual Data
+  youth <- data[[var]][data_filter$group_age == "Youth"]
+  middle_aged <- data[[var]][data_filter$group_age == "Middle_Aged"]
+  
+  # Actual mean difference
+  actual_diff <- mean(middle_aged) - mean(youth)
+  
+  # Permutations
+  perm_diffs <- numeric(n_perm)
+  
+  for (i in 1:n_perm) {
+    perm_group_age <- sample(data_filter$group_age)
+    perm_youth <- data[[var]][perm_group_age == "Youth"]
+    perm_middle_aged <- data[[var]][perm_group_age == "Middle_Aged"]
+    perm_diffs[i] <- mean(perm_middle_aged, na.rm = TRUE) - mean(perm_youth, na.rm = TRUE)
+  }
+  
+  # Calculate p-value
+  p_value <- mean(abs(perm_diffs) >= abs(actual_diff))
+  
+  return(list(actual_diff = actual_diff, p_value = p_value))
+}
+
+# Perform tests for each column
+for (col in columns) {
+  cat("\nPermutation test for variable:", col, "\n")
+  result <- perm_test_age(data_filter, col)
+  cat("Actual mean difference:", result$actual_diff, "\n")
+  cat("P-value:", result$p_value, "\n")
+}
+```
+
+## Logistic Regression
+
+```{r}
+# Re-categorize the 'class' variable
+data_filter <- data_filter %>%
+  mutate(class_binary = case_when(
+    class %in% c("A", "B") ~ 1,
+    class %in% c("C", "D") ~ 0
+  ))
+
+# Ensure 'class_binary' is a factor
+data_filter$class_binary <- as.factor(data_filter$class_binary)
+
+ggplot(data_filter, aes(x = class_binary, fill = class)) +
+  geom_bar(alpha = 0.7, position = 'stack') +
+  theme_minimal() +
+  labs(title = paste("Distribution of class category"), x = 'Class Category', y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+### Model Training and Evaluation
+
+```{r}
+# Split the data into training and testing sets
+set.seed(123)  # For reproducibility
+data_filter_scale <- data_filter %>%
+  mutate_at(vars(age, height_cm, weight_kg, body_fat, diastolic, systolic, grip_force, sit_and_bend_forward_cm, sit_ups_counts, broad_jump_cm),
+            scale)
+
+train_index <- createDataPartition(data_filter_scale$class_binary, p = 0.7, list = FALSE)
+train_data <- data_filter_scale[train_index, ]
+  test_data <- data_filter_scale[-train_index, ]
+
+# Fit the logistic regression model
+logistic_model <- glm(class_binary ~ age + grip_force + sit_ups_counts + broad_jump_cm + body_fat + systolic + diastolic + bmi,
+             data = train_data,
+             family = binomial)
+
+# Summarize the model
+summary(logistic_model)
+vif(logistic_model)
+
+# Make predictions on the test data
+predicted_probs <- predict(logistic_model, test_data, type = "response")
+predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
+predicted_classes <- as.factor(predicted_classes)
+
+# Evaluate the model
+conf_matrix <- confusionMatrix(predicted_classes, test_data$class_binary)
+print(conf_matrix)
+
+# Display overall accuracy
+accuracy <- conf_matrix$overall['Accuracy']
+precision <- conf_matrix$byClass['Precision'] # Precision
+recall <- conf_matrix$byClass['Recall'] # Recall
+f1 <- conf_matrix$byClass['F1'] # F1 Score
+
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall:", round(recall, 4)))
+print(paste("F1 Score:", round(f1, 4)))
+```
+
+### ROC Chart
+
+```{r}
+roc_curve <- roc(test_data$class_binary, predicted_probs)
+# Plot the ROC curve
+plot(roc_curve, main = "Receiver Operating Characteristic (ROC) Curve", col = "blue", lwd = 2)
+text(0.7, 0.3, paste("AUC =", round(auc(roc_curve), 2)), col = "blue")
+
+```
+## Random Forest
+### Data Transformation
+
+```{r}
+# Chuyển đổi cột 'bmi_category' từ 'situation' thành các giá trị số
+data_filter <- subset(data_filter, select = -gender)
+data_filter$bmi_category <- as.numeric(factor(data_filter$bmi_category, levels = c("Underweight", "Normal", "Overweight", "Obese")))
+
+# Kiểm tra kết quả
+head(data_filter)
+
+# Chuyển đổi cột 'systolic_category' từ 'index_systolic' thành các giá trị số
+data_filter$systolic_category <- as.numeric(factor(data_filter$systolic_category, levels = c("Low", "Normal", "High")))
+
+# Chuyển đổi cột 'diastolic_category' từ 'index_diastolic' thành các giá trị số
+data_filter$diastolic_category <- as.numeric(factor(data_filter$diastolic_category, levels = c("Low", "Normal", "High")))
+
+# Kiểm tra kết quả
+head(data_filter)
+
+# Chuyển đổi cột 'class' thành một biến số
+data_filter$class <- as.numeric(factor(data_filter$class, levels = c("A", "B", "C", "D")))
+
+# Chuyển đổi cột class thành factor
+data_filter$class <- as.factor(data_filter$class)
+
+# Kiểm tra kết quả
+head(data_filter)
+
+
+```
+
+### Data Splitting & Preprocessing
+
+```{r}
+# Cài đặt lại seed để tái tạo kết quả chia dữ liệu
+set.seed(123)  # Để tái tạo kết quả chia dữ liệu
+
+# Tạo partition cho train (70%), và test (30%)
+trainIndex <- createDataPartition(data_filter$class, p = 0.7, list = FALSE)  # 70% cho training
+train_data <- data_filter[trainIndex, ]
+test_data <- data_filter[-trainIndex, ]  # Dữ liệu còn lại
+
+# Kiểm tra kích thước các tập dữ liệu
+dim(train_data)
+dim(test_data)
+
+# Lọc các cột cần chuẩn hóa
+cols_to_standardize <- c("age", "height_cm", "weight_kg", "body_fat",
+                         "diastolic", "systolic", "grip_force", 
+                         "sit_and_bend_forward_cm", "sit_ups_counts", 
+                         "broad_jump_cm", "bmi")
+
+# Chuẩn hóa z-score cho các cột
+train_data[cols_to_standardize] <- scale(train_data[cols_to_standardize])
+test_data[cols_to_standardize] <- scale(test_data[cols_to_standardize])
+
+# Kiểm tra kết quả
+summary(train_data)
+colnames(train_data)
+head(train_data)
+
+# Chia X và Y cho tập huấn luyện
+X_train <- train_data[, -which(names(train_data) == "class")]
+Y_train <- train_data$class
+
+# Chia X và Y cho tập kiểm tra
+X_test <- test_data[, -which(names(test_data) == "class")]
+Y_test <- test_data$class
+
+```
+
+### Model Training and Evaluation
+
+```{r}
+# Thiết lập seed để tái lặp kết quả
+set.seed(123)
+
+# Chia dữ liệu thành 5 folds (k=5)
+train_control <- trainControl(method = "cv", number = 5)
+
+# Áp dụng mô hình Random Forest với cross-validation
+model_rf <- train(class ~ ., data = train_data, method = "rf", trControl = train_control)
+
+# In kết quả của mô hình
+print(model_rf)
+
+# Huấn luyện mô hình với mtry = 8
+final_model_rf <- randomForest(class ~ ., data = train_data, mtry = 8)
+
+# Dự đoán trên tập test (nếu có)
+predictions <- predict(final_model_rf, newdata = X_test)
+
+# Đánh giá mô hình
+confusionMatrix(predictions, Y_test)
+
+# Đánh giá độ quan trọng của các đặc trưng
+feature_importance <- importance(final_model_rf)
+
+# Hiển thị kết quả
+print(feature_importance)
+names <- colnames(X_train)
+wrapped_names <- sapply(names, function(x) paste(strwrap(x, width = 6), collapse = "\n"))
+
+# Vẽ biểu đồ độ quan trọng của các đặc trưng
+barplot(importance(final_model_rf)[, 1], names.arg = wrapped_names, main = "Đặc trưng quan trọng", col = "blue", cex.names = 0.5, las = 2)
+```
